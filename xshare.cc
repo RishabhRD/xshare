@@ -6,7 +6,6 @@
 #include <sys/socket.h>
 #include <stdlib.h>
 #include <netinet/in.h>
-#include <unordered_set>
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <sys/stat.h>
@@ -28,7 +27,7 @@ string INAME,PATH,PASSWORD;
 int PORT = 12312;
 bool SINGLE_LAYER = 0;
 string my_ip;
-unordered_set<string> stored_machines;
+unordered_map<string,bool> stored_machines;
 bool PERMIT_COMPRESSED = false;
 void eraseSubStr(std::string & mainStr, const std::string & toErase)
 {
@@ -96,10 +95,6 @@ bool parse_arguments(int argc,char** argv){
 	return false;
 }
 void do_compression(string curpath,int sock){
-	/*struct sockaddr_in addr;
-	memset(&addr,0,sizeof addr);
-	int addrlen = sizeof addr;
-	getpeername(sock,(struct sockaddr*)&addr,(socklen_t*)&addrlen);*/
 	string zipname = curpath;
 	zipname.erase(zipname.length()-1);
 	zipname = zipname+".zip";
@@ -139,7 +134,7 @@ void handle_raw_data(char* data,int sock){
 	string str = string(data);
 	vector<string> vec;
 	boost::split(vec,str,boost::is_any_of(" "));
-	if(vec.at(0)!="GET"&&vec.at(0)!="HEAD"){
+	if(vec.at(0)!="GET"&&vec.at(0)!="HEAD"&&vec.at(0)!="POST"){
 		send(sock,NOT_IMPLEMENTED.c_str(),NOT_IMPLEMENTED.length(),0);
 	}
 	string curpath;
@@ -257,6 +252,43 @@ void handle_raw_data(char* data,int sock){
 	}
 	close(sock);
 }
+void handle_password(int sock,char* data){
+	string str = string(data);
+	vector<string> vec;
+	boost::split(vec,str,boost::is_any_of(" "));
+	string url = "http://"+my_ip+":"+to_string(PORT)+vec.at(1);
+	struct sockaddr_in addr;
+	memset(&addr,0,sizeof addr);
+	int addrlen = sizeof addr;
+	getpeername(sock,(struct sockaddr*)&addr,(socklen_t*)&addrlen);
+	string client_ip = string(inet_ntoa(addr.sin_addr));
+	auto itr = stored_machines.find(client_ip);
+	if(itr==stored_machines.end()){
+		stored_machines[client_ip] = false;
+		string body = "<html><head><style>input, submit{margin-left: 5px; margin-right: 5px;\nwidth: 150px;\n-webkit-box-sizing: border-box;\n-moz-box-sizing: border-box;\nbox-sizing: border-box;\n}</style><title>Authentication</title></head><body><center><h1><font color=red>Enter Server Password</font></h1></center><hr><br><form action=\""+url+"\" method=\"post\">Password: <input type =\"text\" name=\"pass\"><input type=\"submit\" value=\"Log In\"></form></body></html>";
+		body = "HTTP/1.1 200 OK\nConnection: close\nServer: XShare Server\nContent-length: "+to_string(body.length())+"\n\n"+body;
+		send(sock,body.c_str(),body.length(),0);
+	}else{
+		if(itr->second == false){
+			vector<string> lines;
+			boost::split(lines,str,boost::is_any_of("\n"));
+			vector<string> equal;
+			boost::split(equal,lines.at(lines.size()-1),boost::is_any_of("="));
+			if(equal.size()==1||equal.at(equal.size()-1)!=PASSWORD){
+				
+				string body = "<html><head><style>input, submit{margin-left: 5px; margin-right: 5px;\nwidth: 150px;\n-webkit-box-sizing: border-box;\n-moz-box-sizing: border-box;\nbox-sizing: border-box;\n}</style><title>Authentication</title></head><body><center><font color = red><h1>Password Not correct! Retry</h1></font></center><hr><br><form action=\""+url+"\" method=\"post\">Password: <input type =\"text\" name=\"pass\"><input type=\"submit\" value=\"Log In\"></form></body></html>";
+				body = "HTTP/1.1 200 OK\nConnection: close\nServer: XShare Server\nContent-length: "+to_string(body.length())+"\n\n"+body;
+				send(sock,body.c_str(),body.length(),0);
+			}else{
+				itr->second = true;
+				handle_raw_data(data,sock);
+			}
+
+		}else{
+			handle_raw_data(data,sock);
+		}
+	}
+}
 void handle_new_socket(int sock){
 	cout<<"Got a new Connection"<<endl;
 	const int read_len =  1024;
@@ -272,7 +304,7 @@ void handle_new_socket(int sock){
 		if(PASSWORD == " "){
 			handle_raw_data(data,sock);
 		}else{
-
+			handle_password(sock,data);
 		}
 	}catch(const char* e){
 		printf("Exception: %s\n",e);
