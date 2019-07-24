@@ -2,6 +2,7 @@
 #include <thread>
 #include <dirent.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <stdlib.h>
@@ -18,14 +19,17 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include <signal.h>
 using namespace std;
 const string NOT_FOUND = "HTTP/1.1 404 Not Found\nConnection: close\nServer: XShare Server\nContent-length: 48\n\n<html><body><h1>404 NOT FOUND</h1></body></html>";
 const string NOT_IMPLEMENTED = "HTTP/1.1 501 Not Implemented\nConnection: close\nServer: XShare Server\nContent-length: 55\n\n<html><body><h1>METHOD NOT SUPPORTED</h1></body></html>";
 const string COMPRESSION_NOT_ALLOWED = "HTTP/1.1 200 OK\nConnection: close\nServer: XShare Server\nContent-length: 58\n\n<html><body><h1>Compression Not Allowed</h1></body></html>";
 const string COMPRESSING  = "HTTP/1.1 200 OK\nConnection: Keep-Alive\nServer: XShare Server\nContent-length: 46\nKeep-Alive: timeout=40, max=60\n\n<html><body><h1>Compressing</h1></body></html>";
+int server_fd;
 string INAME,PATH,PASSWORD;
 int PORT = 12312;
 bool SINGLE_LAYER = 0;
+bool verbose = false;
 string my_ip;
 unordered_map<string,bool> stored_machines;
 bool PERMIT_COMPRESSED = false;
@@ -45,20 +49,46 @@ inline bool ends_with(std::string const & value, std::string const & ending)
 	if (ending.size() > value.size()) return false;
 	return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
 }
+void handle_sig_int(int sig){
+	sig = 0;
+	cout<<"\nStopping..."<<endl;
+	close(server_fd);
+	exit(0);
+}
 bool parse_arguments(int argc,char** argv){
+	unordered_set<string> arr = {"-a","-d","-h","--help","-i","-p","-s","--permit-compressed","--verbose"};
+	unordered_set<string> prev = {"-a","-d","-i","-p"};
 	unordered_map<string,int> map;
 	for(int i=1;i<argc;i++){
+		if(argv[i][0]=='-'){
+			if(arr.find(string(argv[i]))==arr.end()){
+				cout<<"Unknown option: "<<string(argv[i])<<endl;
+				return true;
+			}
+		}else{
+			if(prev.find(string(argv[i-1]))==prev.end()){
+				cout<<string(argv[i-1])<<" does not accept any argument."<<endl;
+				return true;
+			}
+		}
+		if(prev.find(argv[i])!=prev.end()){
+			if(i+1>=argc||arr.find(string(argv[i+1]))!=arr.end()){
+				cout<<"No value provided for: "<<string(argv[i])<<endl;
+				return true;
+			}
+		}
 		map[string(argv[i])] = i;
 	}
-	if(map.find("-h")!=map.end()){
-		cout<<"XShare is a file-sharing application created by Rishabh Dwivedi.\nOptions:"<<endl;
-		cout<<"-a                    setting password"<<endl;
-		cout<<"-d                    provide port (default port is 12312)"<<endl;
-		cout<<"-h                    help"<<endl;
-		cout<<"-i                    provide interface name"<<endl;
-		cout<<"-p                    path of sharing directory"<<endl;
-		cout<<"-s                    single layer share"<<endl;
-		cout<<"--permit-compressed   Automatically permits to compress directory and send";
+	if(map.find("-h")!=map.end()||map.find("--help")!=map.end()){
+		cout<<"\e[2mUSE:\e[0m\n\txshare -i <interface-name> -p <path>\n\n\e[2mInformation:\e\[0m\n\tXShare is a web-based file-sharing application.With this application you can host your filesystem on local-netowrk.\n\n\tSend bug-report, fixes, enhancements at \e[1mhttps://github.com/RishabhRD/xshare\e[0m\n\tFor any kind of donation contact: \e[1mrishabhdwivedi17@gmail.com\e[0m\n\nOptions:"<<endl;
+		cout<<"-a                    set password"<<endl<<endl;
+		cout<<"-d                    provide alternate port (default port is 12312)"<<endl<<endl;
+		cout<<"-h or --help          help"<<endl<<endl;
+		cout<<"-i                    provide interface name(mendatory) e.g, eth0"<<endl<<endl;
+		cout<<"-p                    path of sharing directory"<<endl<<endl;
+		cout<<"-s                    single layer share(Not share any sub-directories)"<<endl<<endl;
+		cout<<"--permit-compressed   Automatically permits to compress directory and send"<<endl<<endl;
+		cout<<"--verbose             Prints information about the connections"<<endl<<endl;
 		return true;
 	}
 	auto itr = map.find("-i");
@@ -71,6 +101,16 @@ bool parse_arguments(int argc,char** argv){
 	itr = map.find("-p");
 	if(itr != map.end()){
 		PATH = string(argv[(itr->second)+1]);
+		struct stat st;
+		int err = stat(PATH.c_str(),&st);
+		if(err==-1){
+			cout<<"Either given directory does not exist or permission denied"<<endl;
+			return true;
+		}else{
+			if(!S_ISDIR(st.st_mode)){
+				cout<<"Given Path is not a directory."<<endl;
+			}
+		}
 	}else{
 		PATH = ".";
 	}
@@ -87,10 +127,18 @@ bool parse_arguments(int argc,char** argv){
 	itr = map.find("-d");
 	if(itr!=map.end()){
 		PORT = atoi(argv[(itr->second) +1]);
+		if(PORT<=0||PORT>65535){
+			cout<<"Not a valid port"<<endl;
+			return true;
+		}
 	}
 	itr = map.find("--permit-compressed");
 	if(itr!=map.end()){
 		PERMIT_COMPRESSED = true;
+	}
+	itr = map.find("--verbose");
+	if(itr != map.end()){
+		verbose = true;
 	}
 	return false;
 }
@@ -146,7 +194,6 @@ void handle_raw_data(char* data,int sock){
 	}
 	boost::replace_all(requested_path,"%20"," ");
 	curpath = (PATH+requested_path);
-	cout<<"CURPATH: "<<curpath<<endl;
 	struct stat st;
 	int err = stat(curpath.c_str(),&st);
 	if(err==-1){
@@ -192,11 +239,11 @@ void handle_raw_data(char* data,int sock){
 					string sendStr = header+body;
 					send(sock,sendStr.c_str(),sendStr.length(),0);
 				}else{
-					cout<<"CURPATH: "<<curpath<<endl;
 					string body = "<html><head><title>Index Page</title></head><body><h1><font color = red>Index Page</font></h1><hr><br><table border = 1><tr><th>File Name</th><th>File Type</th><th>Special Operation</th></tr>";
 					struct dirent* de;
 					DIR* dr = opendir(curpath.c_str());
 					while((de=readdir(dr))!=NULL){
+						if(string(de->d_name)==".."||string(de->d_name)==".") continue;
 						string curFile = curpath+string(de->d_name);
 						struct stat tmpS;
 						stat(curFile.c_str(),&tmpS);
@@ -236,7 +283,7 @@ void handle_raw_data(char* data,int sock){
 			string dateStr = std::ctime(&date);
 			string header = "HTTP/1.1 200 OK\nConnection: close\nServer: XShare Server\nDate: "+dateStr+"Content-type: "+contentMimeType+"\nContent-length: "+filesize+"Content-Disposition: attachement\n\n";
 			send(sock,header.c_str(),header.length(),0);
-			int numSend = 32765;
+			int numSend = 50000000;
 			int i =0;
 			while(i < s.st_size){
 				if(s.st_size-i>=numSend){
@@ -265,7 +312,7 @@ void handle_password(int sock,char* data){
 	auto itr = stored_machines.find(client_ip);
 	if(itr==stored_machines.end()){
 		stored_machines[client_ip] = false;
-		string body = "<html><head><style>input, submit{margin-left: 5px; margin-right: 5px;\nwidth: 150px;\n-webkit-box-sizing: border-box;\n-moz-box-sizing: border-box;\nbox-sizing: border-box;\n}</style><title>Authentication</title></head><body><center><h1><font color=red>Enter Server Password</font></h1></center><hr><br><form action=\""+url+"\" method=\"post\">Password: <input type =\"text\" name=\"pass\"><input type=\"submit\" value=\"Log In\"></form></body></html>";
+		string body = "<html><head><style>input, submit{margin-left: 5px; margin-right: 5px;\nwidth: 150px;\n-webkit-box-sizing: border-box;\n-moz-box-sizing: border-box;\nbox-sizing: border-box;\n}</style><title>Authentication</title></head><body><center><h1><font color=red>Enter Server Password</font></h1></center><hr><br><form action=\""+url+"\" method=\"post\">Password: <input type =\"password\" name=\"pass\"><input type=\"submit\" value=\"Log In\"></form></body></html>";
 		body = "HTTP/1.1 200 OK\nConnection: close\nServer: XShare Server\nContent-length: "+to_string(body.length())+"\n\n"+body;
 		send(sock,body.c_str(),body.length(),0);
 	}else{
@@ -276,7 +323,7 @@ void handle_password(int sock,char* data){
 			boost::split(equal,lines.at(lines.size()-1),boost::is_any_of("="));
 			if(equal.size()==1||equal.at(equal.size()-1)!=PASSWORD){
 				
-				string body = "<html><head><style>input, submit{margin-left: 5px; margin-right: 5px;\nwidth: 150px;\n-webkit-box-sizing: border-box;\n-moz-box-sizing: border-box;\nbox-sizing: border-box;\n}</style><title>Authentication</title></head><body><center><font color = red><h1>Password Not correct! Retry</h1></font></center><hr><br><form action=\""+url+"\" method=\"post\">Password: <input type =\"text\" name=\"pass\"><input type=\"submit\" value=\"Log In\"></form></body></html>";
+				string body = "<html><head><style>input, submit{margin-left: 5px; margin-right: 5px;\nwidth: 150px;\n-webkit-box-sizing: border-box;\n-moz-box-sizing: border-box;\nbox-sizing: border-box;\n}</style><title>Authentication</title></head><body><center><font color = red><h1>Password Not correct! Retry</h1></font></center><hr><br><form action=\""+url+"\" method=\"post\">Password: <input type =\"password\" name=\"pass\"><input type=\"submit\" value=\"Log In\"></form></body></html>";
 				body = "HTTP/1.1 200 OK\nConnection: close\nServer: XShare Server\nContent-length: "+to_string(body.length())+"\n\n"+body;
 				send(sock,body.c_str(),body.length(),0);
 			}else{
@@ -290,13 +337,24 @@ void handle_password(int sock,char* data){
 	}
 }
 void handle_new_socket(int sock){
-	cout<<"Got a new Connection"<<endl;
 	const int read_len =  1024;
 	char data[read_len]{0};
 	try{
 
 		int rd = read(sock,data,read_len);
-		printf("%s\n",data);
+		if(verbose){
+			struct sockaddr_in addr;
+			memset(&addr,0,sizeof addr);
+			int addrlen = sizeof addr;
+			getpeername(sock,(struct sockaddr*)&addr,(socklen_t*)&addrlen);
+			string client_ip = string(inet_ntoa(addr.sin_addr));
+			cout<<"\nNew Connection from: \e[1m"+client_ip+"\e[0m"<<endl;
+			string str = string(data);
+			vector<string> vec;
+			boost::split(vec,str,boost::is_any_of(" "));
+			if(vec.size()>=2)
+			cout<<"\e[1mRequested: \e[0m"+vec.at(1)<<endl;
+		}
 		if(rd==0){
 			close(sock);
 			return;
@@ -326,7 +384,8 @@ int main(int argc,char** argv){
 	}
 	close(fd);
 	my_ip = string(inet_ntoa(((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr));
-	int server_fd, new_socket ;
+	cout<<"XShare server started(You can use Ctrl-C to stop)...\n\nYou can connect at: \e[1m"+my_ip+":"+to_string(PORT)+"\n\n\e[1mSharing Directory:\e[0m   "+PATH+"\n\e[1mInterface:\e[0m   "+INAME+"\e[0m"<<endl<<endl;
+	int  new_socket ;
 	struct sockaddr_in address;
 	int addrlen = sizeof(address);
 	if((server_fd = socket(AF_INET,SOCK_STREAM,0))==0){
@@ -343,14 +402,13 @@ int main(int argc,char** argv){
 		perror("Port already in use");
 		exit(EXIT_FAILURE);
 	} 
+	signal(2,handle_sig_int);
 	if (listen(server_fd, 40)!= 0) 
 	{ 
 		perror("New Client Trying to Connect. Queue Full, Connection Refused"); 
 		exit(EXIT_FAILURE); 
 	}
-	cout<<"Listening"<<endl;
 	while(1){
-		cout<<"Reached here"<<endl;
 		if ((new_socket = accept(server_fd, (struct sockaddr *)&address,
 						(socklen_t*)&addrlen))<0)
 		{
