@@ -20,6 +20,7 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <vector>
 using namespace std;
 const string NOT_FOUND = "HTTP/1.1 404 Not Found\nConnection: close\nServer: XShare Server\nContent-length: 48\n\n<html><body><h1>404 NOT FOUND</h1></body></html>";
 const string NOT_IMPLEMENTED = "HTTP/1.1 501 Not Implemented\nConnection: close\nServer: XShare Server\nContent-length: 55\n\n<html><body><h1>METHOD NOT SUPPORTED</h1></body></html>";
